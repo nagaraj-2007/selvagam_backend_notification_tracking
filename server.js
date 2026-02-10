@@ -86,6 +86,17 @@ async function fetchStudentsAtStop(stopId) {
     }
 }
 
+// Helper: Fetch FCM tokens by route
+async function fetchTokensByRoute(routeId) {
+    try {
+        const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/by-route/${routeId}`);
+        return response.data || [];
+    } catch (error) {
+        console.error('Error fetching FCM tokens:', error.message);
+        return [];
+    }
+}
+
 // Helper: Fetch parent FCM tokens
 async function fetchParentTokens(parentIds) {
     try {
@@ -236,6 +247,29 @@ app.post('/api/v1/bus-tracking/location', async (req, res) => {
 });
 
 // ============================================
+// API ENDPOINT: Send Notifications to Tokens
+// ============================================
+app.post('/api/v1/notifications/send', async (req, res) => {
+    const { tokens, title, message, data } = req.body;
+
+    if (!tokens || !Array.isArray(tokens) || tokens.length === 0) {
+        return res.status(400).json({ error: 'Missing or invalid tokens array' });
+    }
+
+    if (!title || !message) {
+        return res.status(400).json({ error: 'Missing required fields: title, message' });
+    }
+
+    try {
+        await sendFCMNotification(tokens, title, message, data || {});
+        res.json({ success: true, recipients: tokens.length });
+    } catch (error) {
+        console.error('Error sending notifications:', error.message);
+        res.status(500).json({ error: 'Failed to send notifications', message: error.message });
+    }
+});
+
+// ============================================
 // API ENDPOINT: Send Custom Notification
 // ============================================
 app.post('/api/v1/bus-tracking/notify', async (req, res) => {
@@ -278,6 +312,37 @@ app.post('/api/v1/bus-tracking/notify', async (req, res) => {
     } catch (error) {
         console.error('Error sending custom notification:', error.message);
         res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ============================================
+// API ENDPOINT: Test FCM Notification by Route
+// ============================================
+app.post('/api/v1/notifications/test-route', async (req, res) => {
+    const { route_id, title, message } = req.body;
+
+    if (!route_id) {
+        return res.status(400).json({ error: 'Missing required field: route_id' });
+    }
+
+    try {
+        const tokens = await fetchTokensByRoute(route_id);
+        
+        if (tokens.length === 0) {
+            return res.status(404).json({ error: 'No FCM tokens found for this route' });
+        }
+
+        await sendFCMNotification(
+            tokens,
+            title || '🚌 Test Notification',
+            message || 'This is a test notification from your bus tracking system',
+            { route_id, test: 'true' }
+        );
+
+        res.json({ success: true, tokens_count: tokens.length, tokens });
+    } catch (error) {
+        console.error('Error sending test notification:', error.message);
+        res.status(500).json({ error: 'Failed to send notification', message: error.message });
     }
 });
 
