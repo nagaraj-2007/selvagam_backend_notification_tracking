@@ -3,6 +3,8 @@ const axios = require('axios');
 const geolib = require('geolib');
 const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
+const swaggerUi = require('swagger-ui-express');
+const swaggerJsdoc = require('swagger-jsdoc');
 require('dotenv').config();
 
 const app = express();
@@ -28,6 +30,35 @@ try {
     console.warn('Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in .env');
 }
 
+// Swagger Configuration
+const swaggerOptions = {
+    definition: {
+        openapi: '3.0.0',
+        info: {
+            title: 'School Bus Notification Tracking API',
+            version: '2.0.0',
+            description: 'API for real-time bus tracking and automated parent notifications via Firebase Cloud Messaging (FCM).',
+            contact: {
+                name: 'API Support'
+            },
+        },
+        servers: [
+            {
+                url: `http://72.61.250.191:${PORT}`,
+                description: 'Production Server'
+            },
+            {
+                url: `http://localhost:${PORT}`,
+                description: 'Local Development'
+            }
+        ],
+    },
+    apis: ['./server.js'], // Path to the API docs
+};
+
+const swaggerDocs = swaggerJsdoc(swaggerOptions);
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+
 // In-memory store for active trips
 const activeTrips = new Map();
 const notifiedStops = new Map(); // Track which stops have been notified
@@ -50,9 +81,9 @@ async function sendFCMNotification(tokens, title, body, data = {}) {
             }
 
             const message = {
-                notification: { 
-                    title, 
-                    body 
+                notification: {
+                    title,
+                    body
                 },
                 data: stringData,
                 android: {
@@ -95,14 +126,14 @@ async function fetchAllTokens() {
     try {
         const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/all`);
         const data = response.data;
-        
+
         // Extract token strings from objects returned by the backend
         if (data.parents && Array.isArray(data.parents)) {
             return data.parents
                 .map(item => item.fcm_token)
                 .filter(token => token && typeof token === 'string');
         }
-        
+
         // Fallback for flat array structure
         if (Array.isArray(data)) {
             return data
@@ -148,7 +179,7 @@ async function fetchStudentsAtStop(stopId) {
     try {
         // Backend doesn't have students/by-stop, it has fcm-tokens/by-stop which returns students too
         const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/by-stop/${stopId}`);
-        return response.data.students || []; 
+        return response.data.students || [];
     } catch (error) {
         console.error(`Error fetching students for stop ${stopId}:`, error.message);
         return [];
@@ -160,9 +191,9 @@ async function fetchTokensByRoute(routeId) {
     try {
         const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/by-route/${routeId}`);
         const data = response.data;
-        
+
         console.log('Raw API response:', JSON.stringify(data, null, 2));
-        
+
         // Handle nested structure with stops
         if (data.stops && Array.isArray(data.stops)) {
             const tokens = [];
@@ -179,14 +210,14 @@ async function fetchTokensByRoute(routeId) {
             // Remove duplicates
             return [...new Set(tokens)];
         }
-        
+
         // Fallback: flat array structure
         if (Array.isArray(data)) {
             return data
                 .map(item => item.fcm_token || item.token || item)
                 .filter(token => token && typeof token === 'string');
         }
-        
+
         return [];
     } catch (error) {
         console.error('Error fetching FCM tokens:', error.message);
@@ -214,6 +245,37 @@ async function fetchParentTokens(parentIds) {
 // ============================================
 // API ENDPOINT: Update Bus Location
 // ============================================
+/**
+ * @swagger
+ * /api/v1/bus-tracking/location:
+ *   post:
+ *     summary: Update bus location and trigger proximity notifications
+ *     tags: [Tracking]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - trip_id
+ *               - latitude
+ *               - longitude
+ *             properties:
+ *               trip_id:
+ *                 type: string
+ *               latitude:
+ *                 type: number
+ *               longitude:
+ *                 type: number
+ *               timestamp:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Location processed successfully
+ *       400:
+ *         description: Missing required fields
+ */
 app.post('/api/v1/bus-tracking/location', async (req, res) => {
     const { trip_id, latitude, longitude, timestamp } = req.body;
 
@@ -284,7 +346,7 @@ app.post('/api/v1/bus-tracking/location', async (req, res) => {
 
                     // Get FCM tokens for this stop efficiently
                     const currentStopTokens = await fetchTokensAtStop(stop.stop_id);
-                    
+
                     // Send notification to current stop parents
                     if (currentStopTokens.length > 0) {
                         await sendFCMNotification(
@@ -364,6 +426,37 @@ app.post('/api/v1/bus-tracking/location', async (req, res) => {
 // ============================================
 // API ENDPOINT: Send Notifications to Tokens
 // ============================================
+/**
+ * @swagger
+ * /api/v1/notifications/send:
+ *   post:
+ *     summary: Send FCM notification to specific tokens
+ *     tags: [Notifications]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - tokens
+ *               - title
+ *               - message
+ *             properties:
+ *               tokens:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               title:
+ *                 type: string
+ *               message:
+ *                 type: string
+ *               data:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Notifications sent
+ */
 app.post('/api/v1/notifications/send', async (req, res) => {
     const { tokens, title, message, data } = req.body;
 
@@ -387,6 +480,32 @@ app.post('/api/v1/notifications/send', async (req, res) => {
 // ============================================
 // API ENDPOINT: Send Custom Notification
 // ============================================
+/**
+ * @swagger
+ * /api/v1/bus-tracking/notify:
+ *   post:
+ *     summary: Send custom notification for a trip or specific stop
+ *     tags: [Notifications]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - trip_id
+ *               - message
+ *             properties:
+ *               trip_id:
+ *                 type: string
+ *               message:
+ *                 type: string
+ *               stop_id:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Custom notification sent
+ */
 app.post('/api/v1/bus-tracking/notify', async (req, res) => {
     const { trip_id, message, stop_id } = req.body;
 
@@ -436,7 +555,7 @@ app.post('/api/v1/notifications/test-route', async (req, res) => {
 
     try {
         const tokens = await fetchTokensByRoute(route_id);
-        
+
         if (tokens.length === 0) {
             return res.status(404).json({ error: 'No FCM tokens found for this route' });
         }
@@ -458,6 +577,32 @@ app.post('/api/v1/notifications/test-route', async (req, res) => {
 // ============================================
 // API ENDPOINT: Send Notification to All Parents
 // ============================================
+/**
+ * @swagger
+ * /api/v1/notifications/send-all:
+ *   post:
+ *     summary: Send FCM notification to ALL registered parents
+ *     tags: [Notifications]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - title
+ *               - message
+ *             properties:
+ *               title:
+ *                 type: string
+ *               message:
+ *                 type: string
+ *               data:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Broadcast sent successfully
+ */
 app.post('/api/v1/notifications/send-all', async (req, res) => {
     const { title, message, data } = req.body;
 
@@ -485,6 +630,31 @@ app.post('/api/v1/notifications/send-all', async (req, res) => {
 // ============================================
 // API ENDPOINT: Notify Trip Status Change
 // ============================================
+/**
+ * @swagger
+ * /api/v1/notifications/trip-status:
+ *   post:
+ *     summary: Send notification when trip status changes
+ *     tags: [Trips]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - trip_id
+ *               - status
+ *             properties:
+ *               trip_id:
+ *                 type: string
+ *               status:
+ *                 type: string
+ *                 example: "STARTED"
+ *     responses:
+ *       200:
+ *         description: Status notification sent
+ */
 app.post('/api/v1/notifications/trip-status', async (req, res) => {
     const { trip_id, status } = req.body;
 
@@ -506,8 +676,8 @@ app.post('/api/v1/notifications/trip-status', async (req, res) => {
 
         // Prepare notification based on status
         let title, message;
-        
-        switch(status.toUpperCase()) {
+
+        switch (status.toUpperCase()) {
             case 'STARTED':
                 title = '🚌 Bus Started';
                 message = `Bus has started the trip on Route ${trip.route_id}`;
@@ -560,7 +730,7 @@ app.post('/api/v1/trip/start', async (req, res) => {
     try {
         console.log(`\n========== START TRIP ==========`);
         console.log(`Trip: ${trip_id}, Route: ${route_id}`);
-        
+
         // Initialize trip data if not already initialized
         if (!activeTrips.has(trip_id)) {
             const stops = await fetchRouteStops(route_id);
@@ -577,7 +747,7 @@ app.post('/api/v1/trip/start', async (req, res) => {
 
         const tokens = await fetchTokensByRoute(route_id);
         console.log(`Found ${tokens.length} tokens`);
-        
+
         if (tokens.length > 0) {
             await sendFCMNotification(
                 tokens,
@@ -607,7 +777,7 @@ app.post('/api/v1/trip/pause', async (req, res) => {
 
     try {
         const tokens = await fetchTokensByRoute(route_id);
-        
+
         if (tokens.length > 0) {
             await sendFCMNotification(
                 tokens,
@@ -636,7 +806,7 @@ app.post('/api/v1/trip/complete', async (req, res) => {
 
     try {
         const tokens = await fetchTokensByRoute(route_id);
-        
+
         if (tokens.length > 0) {
             await sendFCMNotification(
                 tokens,
@@ -660,6 +830,16 @@ app.post('/api/v1/trip/complete', async (req, res) => {
 // ============================================
 // Health Check Endpoint
 // ============================================
+/**
+ * @swagger
+ * /health:
+ *   get:
+ *     summary: Check service health and active trip count
+ *     tags: [System]
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ */
 app.get('/health', (req, res) => {
     res.json({
         status: 'OK',
@@ -677,8 +857,8 @@ app.get('/api/v1/test/tokens/:route_id', async (req, res) => {
         console.log(`Testing token fetch for route: ${route_id}`);
         const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/by-route/${route_id}`);
         console.log('API Response:', response.data);
-        res.json({ 
-            route_id, 
+        res.json({
+            route_id,
             raw_response: response.data,
             token_count: Array.isArray(response.data) ? response.data.length : 0
         });
@@ -693,30 +873,30 @@ app.get('/api/v1/test/tokens/:route_id', async (req, res) => {
 // ============================================
 app.post('/api/v1/test/simulate-location', async (req, res) => {
     const { trip_id, stop_index } = req.body;
-    
+
     try {
         // Get trip data
         const tripResponse = await axios.get(`${MAIN_BACKEND_URL}/trips/${trip_id}`);
         const trip = tripResponse.data;
-        
+
         // Get stops
         const stops = await fetchRouteStops(trip.route_id);
-        
+
         if (stop_index >= stops.length) {
             return res.status(400).json({ error: 'Invalid stop index' });
         }
-        
+
         const targetStop = stops[stop_index];
-        
+
         // Simulate location 400m away from stop (within 500m geofence)
         const simulatedLat = targetStop.latitude + 0.0036; // ~400m north
         const simulatedLng = targetStop.longitude;
-        
+
         console.log(`\n🧪 SIMULATING LOCATION`);
         console.log(`Target Stop: ${targetStop.stop_name}`);
         console.log(`Stop Location: ${targetStop.latitude}, ${targetStop.longitude}`);
         console.log(`Simulated Bus Location: ${simulatedLat}, ${simulatedLng}`);
-        
+
         // Send to location endpoint
         const locationResponse = await axios.post(`http://localhost:${PORT}/api/v1/bus-tracking/location`, {
             trip_id,
@@ -724,7 +904,7 @@ app.post('/api/v1/test/simulate-location', async (req, res) => {
             longitude: simulatedLng,
             timestamp: new Date().toISOString()
         });
-        
+
         res.json({
             success: true,
             message: 'Location simulated',
