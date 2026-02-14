@@ -93,10 +93,17 @@ async function sendFCMNotification(tokens, title, body, data = {}) {
 // Helper: Fetch ALL FCM tokens
 async function fetchAllTokens() {
     try {
-        const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens`);
+        const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/all`);
         const data = response.data;
         
-        // Extract token strings from objects
+        // Extract token strings from objects returned by the backend
+        if (data.parents && Array.isArray(data.parents)) {
+            return data.parents
+                .map(item => item.fcm_token)
+                .filter(token => token && typeof token === 'string');
+        }
+        
+        // Fallback for flat array structure
         if (Array.isArray(data)) {
             return data
                 .map(item => item.fcm_token || item.token || item)
@@ -120,11 +127,28 @@ async function fetchRouteStops(routeId) {
     }
 }
 
-// Helper: Fetch students for a specific stop
+// Helper: Fetch tokens for a specific stop
+async function fetchTokensAtStop(stopId) {
+    try {
+        const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/by-stop/${stopId}`);
+        if (response.data && response.data.fcm_tokens) {
+            return response.data.fcm_tokens
+                .map(t => t.fcm_token)
+                .filter(token => token && typeof token === 'string');
+        }
+        return [];
+    } catch (error) {
+        console.error(`Error fetching tokens for stop ${stopId}:`, error.message);
+        return [];
+    }
+}
+
+// Helper: Fetch students for a specific stop (unused but fixed)
 async function fetchStudentsAtStop(stopId) {
     try {
-        const response = await axios.get(`${MAIN_BACKEND_URL}/students/by-route/${stopId}`);
-        return response.data;
+        // Backend doesn't have students/by-stop, it has fcm-tokens/by-stop which returns students too
+        const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/by-stop/${stopId}`);
+        return response.data.students || []; 
     } catch (error) {
         console.error(`Error fetching students for stop ${stopId}:`, error.message);
         return [];
@@ -202,7 +226,7 @@ app.post('/api/v1/bus-tracking/location', async (req, res) => {
     try {
         // Get or initialize trip data
         if (!activeTrips.has(trip_id)) {
-            // Fetch trip details from main backend
+            // Fetch trip details
             const tripResponse = await axios.get(`${MAIN_BACKEND_URL}/trips/${trip_id}`);
             const trip = tripResponse.data;
 
@@ -221,7 +245,7 @@ app.post('/api/v1/bus-tracking/location', async (req, res) => {
 
             console.log(`✅ Initialized trip ${trip_id} with ${stops.length} stops`);
 
-            // Send trip started notification
+            // Send trip started notification ONLY IF not already sent by start endpoint
             const tokens = await fetchTokensByRoute(trip.route_id);
             if (tokens.length > 0) {
                 await sendFCMNotification(
@@ -258,20 +282,9 @@ app.post('/api/v1/bus-tracking/location', async (req, res) => {
                     notifiedStops.get(trip_id).add(stopKey);
                     tripData.currentStopIndex = i;
 
-                    // Get FCM tokens for this stop from the nested structure
-                    const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens/by-route/${tripData.routeId}`);
-                    const routeData = response.data;
+                    // Get FCM tokens for this stop efficiently
+                    const currentStopTokens = await fetchTokensAtStop(stop.stop_id);
                     
-                    let currentStopTokens = [];
-                    if (routeData.stops && Array.isArray(routeData.stops)) {
-                        const currentStop = routeData.stops.find(s => s.stop_id === stop.stop_id);
-                        if (currentStop && currentStop.fcm_tokens) {
-                            currentStopTokens = currentStop.fcm_tokens
-                                .map(t => t.fcm_token)
-                                .filter(token => token && typeof token === 'string');
-                        }
-                    }
-
                     // Send notification to current stop parents
                     if (currentStopTokens.length > 0) {
                         await sendFCMNotification(
@@ -291,16 +304,7 @@ app.post('/api/v1/bus-tracking/location', async (req, res) => {
                     // Notify next stop parents that bus reached current stop
                     if (i + 1 < tripData.stops.length) {
                         const nextStop = tripData.stops[i + 1];
-                        
-                        let nextStopTokens = [];
-                        if (routeData.stops && Array.isArray(routeData.stops)) {
-                            const nextStopData = routeData.stops.find(s => s.stop_id === nextStop.stop_id);
-                            if (nextStopData && nextStopData.fcm_tokens) {
-                                nextStopTokens = nextStopData.fcm_tokens
-                                    .map(t => t.fcm_token)
-                                    .filter(token => token && typeof token === 'string');
-                            }
-                        }
+                        const nextStopTokens = await fetchTokensAtStop(nextStop.stop_id);
 
                         if (nextStopTokens.length > 0) {
                             await sendFCMNotification(
@@ -395,19 +399,13 @@ app.post('/api/v1/bus-tracking/notify', async (req, res) => {
 
         if (stop_id) {
             // Send to specific stop parents
-            const students = await fetchStudentsAtStop(stop_id);
-            const parentIds = [...new Set(students.map(s => s.parent_id))];
-            tokens = await fetchParentTokens(parentIds);
+            tokens = await fetchTokensAtStop(stop_id);
         } else {
             // Send to all parents on the route
             const tripData = activeTrips.get(trip_id);
             if (tripData) {
-                for (const stop of tripData.stops) {
-                    const students = await fetchStudentsAtStop(stop.stop_id);
-                    const parentIds = [...new Set(students.map(s => s.parent_id))];
-                    const stopTokens = await fetchParentTokens(parentIds);
-                    tokens.push(...stopTokens);
-                }
+                const routeTokens = await fetchTokensByRoute(tripData.routeId);
+                tokens.push(...routeTokens);
             }
         }
 
@@ -464,8 +462,7 @@ app.post('/api/v1/notifications/send-all', async (req, res) => {
     const { title, message, data } = req.body;
 
     try {
-        const response = await axios.get(`${MAIN_BACKEND_URL}/fcm-tokens`);
-        const tokens = response.data;
+        const tokens = await fetchAllTokens();
 
         if (!tokens || tokens.length === 0) {
             return res.status(404).json({ error: 'No FCM tokens found' });
@@ -563,10 +560,23 @@ app.post('/api/v1/trip/start', async (req, res) => {
     try {
         console.log(`\n========== START TRIP ==========`);
         console.log(`Trip: ${trip_id}, Route: ${route_id}`);
-        console.log(`Fetching tokens from: ${MAIN_BACKEND_URL}/fcm-tokens/by-route/${route_id}`);
         
+        // Initialize trip data if not already initialized
+        if (!activeTrips.has(trip_id)) {
+            const stops = await fetchRouteStops(route_id);
+            activeTrips.set(trip_id, {
+                tripId: trip_id,
+                routeId: route_id,
+                stops: stops,
+                currentStopIndex: -1,
+                status: 'STARTED'
+            });
+            notifiedStops.set(trip_id, new Set());
+            console.log(`Initialized trip data for ${trip_id}`);
+        }
+
         const tokens = await fetchTokensByRoute(route_id);
-        console.log(`Found ${tokens.length} tokens:`, tokens);
+        console.log(`Found ${tokens.length} tokens`);
         
         if (tokens.length > 0) {
             await sendFCMNotification(
@@ -575,8 +585,6 @@ app.post('/api/v1/trip/start', async (req, res) => {
                 'Your bus has started the trip',
                 { trip_id, route_id, status: 'STARTED' }
             );
-        } else {
-            console.log('⚠️ No tokens found!');
         }
         console.log(`================================\n`);
 
